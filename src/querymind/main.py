@@ -32,6 +32,7 @@ UI_HTML = """
                 --text: #e5e7eb;
                 --muted: #9ca3af;
                 --accent: #22c55e;
+                --warn: #f59e0b;
                 --danger: #ef4444;
             }
             * { box-sizing: border-box; }
@@ -76,6 +77,7 @@ UI_HTML = """
                 display: flex;
                 gap: 10px;
                 align-items: center;
+                flex-wrap: wrap;
             }
             button {
                 background: var(--accent);
@@ -90,9 +92,15 @@ UI_HTML = """
                 background: #334155;
                 color: #e5e7eb;
             }
+            .ghost {
+                background: #1f2937;
+                color: #e5e7eb;
+                border: 1px solid #334155;
+            }
             .status { font-weight: 700; }
             .status.ok { color: var(--accent); }
             .status.err { color: var(--danger); }
+            .status.warn { color: var(--warn); }
             pre {
                 background: #020617;
                 border: 1px solid #334155;
@@ -104,6 +112,48 @@ UI_HTML = """
                 max-height: 420px;
                 overflow: auto;
             }
+            .panel {
+                background: #020617;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                padding: 12px;
+                margin-top: 12px;
+            }
+            .mini {
+                font-size: 13px;
+                color: var(--muted);
+            }
+            .samples {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+            .tabbar {
+                display: flex;
+                gap: 8px;
+                margin-top: 12px;
+            }
+            .tabbar button.active {
+                background: #16a34a;
+                color: #052e16;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 10px;
+            }
+            th, td {
+                border: 1px solid #334155;
+                padding: 8px;
+                text-align: left;
+                font-size: 14px;
+            }
+            th {
+                background: #111827;
+                position: sticky;
+                top: 0;
+            }
+            .hidden { display: none; }
             @media (max-width: 760px) {
                 .row { grid-template-columns: 1fr; }
             }
@@ -114,6 +164,23 @@ UI_HTML = """
             <div class=\"card\">
                 <h1>QueryMind v2</h1>
                 <p>Run natural language analytics queries and inspect the API response.</p>
+
+                <div class=\"panel\">
+                    <div><strong>Dataset Mode:</strong> <span id=\"mode\">Loading...</span></div>
+                    <div class=\"mini\" id=\"modeDetail\"></div>
+                </div>
+
+                <div class=\"panel\">
+                    <div><strong>Sample Queries</strong></div>
+                    <div class=\"samples\">
+                        <button class=\"ghost sample\" data-q=\"Average order value by country\">AOV by country</button>
+                        <button class=\"ghost sample\" data-q=\"Top products by revenue\">Top revenue products</button>
+                        <button class=\"ghost sample\" data-q=\"Which products have declining reviews over time?\">
+                            Declining reviews trend
+                        </button>
+                        <button class=\"ghost sample\" data-q=\"Most reviewed products\">Most reviewed products</button>
+                    </div>
+                </div>
 
                 <label for=\"query\">Query</label>
                 <textarea id=\"query\">Average order value by country</textarea>
@@ -130,6 +197,7 @@ UI_HTML = """
                     <div class=\"actions\">
                         <button id=\"run\">Run Query</button>
                         <button id=\"clear\" class=\"secondary\">Clear</button>
+                        <button id=\"download\" class=\"ghost\">Download CSV</button>
                     </div>
                 </div>
 
@@ -137,27 +205,162 @@ UI_HTML = """
                     <span id=\"status\" class=\"status\"></span>
                 </div>
 
-                <pre id=\"out\">Response will appear here.</pre>
+                <div class=\"tabbar\">
+                    <button id=\"tabTable\" class=\"ghost active\">Table</button>
+                    <button id=\"tabJson\" class=\"ghost\">JSON</button>
+                </div>
+
+                <div id=\"tablePanel\" class=\"panel\">
+                    <div id=\"tableInfo\" class=\"mini\">Run a query to render table.</div>
+                    <div style=\"max-height: 420px; overflow: auto;\">
+                        <table id=\"resultTable\" class=\"hidden\">
+                            <thead id=\"resultHead\"></thead>
+                            <tbody id=\"resultBody\"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <pre id=\"out\" class=\"hidden\">Response will appear here.</pre>
+
+                <div class=\"panel\">
+                    <div><strong>To run on real Elasticsearch dataset</strong></div>
+                    <ol class=\"mini\">
+                        <li>Set <code>MOCK_MODE=false</code> in your .env.</li>
+                        <li>Set <code>ELASTIC_ENDPOINT</code>, <code>ELASTIC_API_KEY</code>, and <code>GEMINI_API_KEY</code>.</li>
+                        <li>Restart server and check <code>/ready</code> returns <code>status=ready</code>.</li>
+                    </ol>
+                </div>
             </div>
         </div>
 
         <script>
             const runBtn = document.getElementById('run');
             const clearBtn = document.getElementById('clear');
+            const downloadBtn = document.getElementById('download');
             const queryEl = document.getElementById('query');
             const maxEl = document.getElementById('max');
             const rawEl = document.getElementById('raw');
             const outEl = document.getElementById('out');
             const statusEl = document.getElementById('status');
+            const tableEl = document.getElementById('resultTable');
+            const headEl = document.getElementById('resultHead');
+            const bodyEl = document.getElementById('resultBody');
+            const tableInfoEl = document.getElementById('tableInfo');
+            const tabTable = document.getElementById('tabTable');
+            const tabJson = document.getElementById('tabJson');
+            const tablePanel = document.getElementById('tablePanel');
+            const modeEl = document.getElementById('mode');
+            const modeDetailEl = document.getElementById('modeDetail');
+            const sampleBtns = Array.from(document.querySelectorAll('.sample'));
 
-            function setStatus(text, ok) {
+            let lastRows = [];
+            let lastResponse = null;
+
+            function setStatus(text, kind) {
                 statusEl.textContent = text;
-                statusEl.className = 'status ' + (ok ? 'ok' : 'err');
+                statusEl.className = 'status ' + kind;
             }
 
+            function setTab(tab) {
+                if (tab === 'table') {
+                    tablePanel.classList.remove('hidden');
+                    outEl.classList.add('hidden');
+                    tabTable.classList.add('active');
+                    tabJson.classList.remove('active');
+                } else {
+                    tablePanel.classList.add('hidden');
+                    outEl.classList.remove('hidden');
+                    tabJson.classList.add('active');
+                    tabTable.classList.remove('active');
+                }
+            }
+
+            function renderTable(rows) {
+                if (!Array.isArray(rows) || rows.length === 0) {
+                    tableEl.classList.add('hidden');
+                    tableInfoEl.textContent = 'No row data to render as table.';
+                    headEl.innerHTML = '';
+                    bodyEl.innerHTML = '';
+                    return;
+                }
+
+                const columns = Array.from(rows.reduce((acc, row) => {
+                    Object.keys(row || {}).forEach(k => acc.add(k));
+                    return acc;
+                }, new Set()));
+
+                headEl.innerHTML = '<tr>' + columns.map(c => `<th>${c}</th>`).join('') + '</tr>';
+                bodyEl.innerHTML = rows.map((row) => {
+                    const tds = columns.map((c) => `<td>${row[c] ?? ''}</td>`).join('');
+                    return `<tr>${tds}</tr>`;
+                }).join('');
+
+                tableInfoEl.textContent = `Showing ${rows.length} row(s).`;
+                tableEl.classList.remove('hidden');
+            }
+
+            function toCsv(rows) {
+                if (!Array.isArray(rows) || rows.length === 0) {
+                    return '';
+                }
+                const cols = Array.from(rows.reduce((acc, row) => {
+                    Object.keys(row || {}).forEach(k => acc.add(k));
+                    return acc;
+                }, new Set()));
+
+                const esc = (val) => {
+                    const s = String(val ?? '');
+                    return '"' + s.replaceAll('"', '""') + '"';
+                };
+
+                const lines = [cols.map(esc).join(',')];
+                for (const row of rows) {
+                    lines.push(cols.map((c) => esc(row[c])).join(','));
+                }
+                return lines.join('\n');
+            }
+
+            async function loadMode() {
+                try {
+                    const [diagRes, readyRes] = await Promise.all([
+                        fetch('/diagnostics'),
+                        fetch('/ready')
+                    ]);
+                    const d = await diagRes.json();
+                    const r = await readyRes.json();
+
+                    if (d.mock_mode) {
+                        modeEl.textContent = 'Mock dataset (built-in sample rows)';
+                        modeEl.style.color = '#22c55e';
+                    } else {
+                        modeEl.textContent = 'Live Elasticsearch dataset';
+                        modeEl.style.color = '#f59e0b';
+                    }
+
+                    modeDetailEl.textContent =
+                        `Ready status: ${r.status}. ` +
+                        `Elastic key configured: ${d.elastic_configured}. ` +
+                        `Gemini key configured: ${d.gemini_configured}.`;
+                } catch (err) {
+                    modeEl.textContent = 'Unable to load diagnostics';
+                    modeEl.style.color = '#ef4444';
+                    modeDetailEl.textContent = String(err);
+                }
+            }
+
+            tabTable.addEventListener('click', () => setTab('table'));
+            tabJson.addEventListener('click', () => setTab('json'));
+
+            sampleBtns.forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    queryEl.value = btn.dataset.q || '';
+                });
+            });
+
             runBtn.addEventListener('click', async () => {
-                setStatus('Running...', true);
+                setStatus('Running...', 'ok');
                 outEl.textContent = 'Loading...';
+                tableInfoEl.textContent = 'Loading...';
 
                 const payload = {
                     query: queryEl.value,
@@ -172,18 +375,46 @@ UI_HTML = """
                         body: JSON.stringify(payload)
                     });
                     const body = await res.json();
+                    lastResponse = body;
+                    lastRows = body.raw_results || [];
                     outEl.textContent = JSON.stringify(body, null, 2);
-                    setStatus('HTTP ' + res.status + (res.ok ? ' OK' : ' Error'), res.ok);
+                    renderTable(lastRows);
+
+                    const kind = res.ok ? (body.status === 'error' ? 'err' : 'ok') : 'err';
+                    setStatus('HTTP ' + res.status + (res.ok ? ' OK' : ' Error'), kind);
                 } catch (err) {
                     outEl.textContent = String(err);
-                    setStatus('Request failed', false);
+                    renderTable([]);
+                    setStatus('Request failed', 'err');
                 }
             });
 
             clearBtn.addEventListener('click', () => {
                 outEl.textContent = 'Response will appear here.';
-                setStatus('', true);
+                renderTable([]);
+                lastRows = [];
+                lastResponse = null;
+                setStatus('', 'ok');
             });
+
+            downloadBtn.addEventListener('click', () => {
+                const csv = toCsv(lastRows);
+                if (!csv) {
+                    setStatus('No rows to export.', 'warn');
+                    return;
+                }
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'querymind-results.csv';
+                a.click();
+                URL.revokeObjectURL(url);
+                setStatus('CSV downloaded.', 'ok');
+            });
+
+            setTab('table');
+            loadMode();
         </script>
     </body>
 </html>
@@ -192,7 +423,7 @@ UI_HTML = """
 
 @app.get("/", response_class=HTMLResponse)
 async def ui() -> str:
-        return UI_HTML
+    return UI_HTML
 
 
 @app.get("/health")
