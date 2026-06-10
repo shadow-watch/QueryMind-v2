@@ -317,7 +317,7 @@ UI_HTML = """
                 for (const row of rows) {
                     lines.push(cols.map((c) => esc(row[c])).join(','));
                 }
-                return lines.join('\n');
+                return lines.join('\\n');
             }
 
             async function loadMode() {
