@@ -7,6 +7,13 @@ from querymind.main import app
 client = TestClient(app)
 
 
+def test_ui_root_endpoint() -> None:
+    res = client.get("/")
+    assert res.status_code == 200
+    assert "QueryMind v2" in res.text
+    assert "Run Query" in res.text
+
+
 def test_health_endpoint() -> None:
     res = client.get("/health")
     assert res.status_code == 200
